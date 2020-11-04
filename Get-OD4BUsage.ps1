@@ -5,46 +5,57 @@
 #   of ethical and legal considerations!
 #   Could be easily adapted for SPO sites instead.
 #   Likely improvements: 
-#           -move file type configuration to external source, 
+#           -move file type configuration to external source
 #           -test performance against larger tenant and improve from there
 #           -switch to Azure AD app authentication
 #           -support for credentials vault/secure storage
-#           -write to CSV for further processing/graphing
-#           -progress bars
-#           -calculate percentage of total count/size per type
+#           -option to write to SPO site
+#           -run for individual user
 ###
 
 ###
-#   Variables
+#   Variables / Configuration
 ###
 
 $tenant = "ventcore"
 $divisor = "1MB" #file size will be divided by this
 
+$path = "$HOME\Desktop\OD4B Reports\"
+$filename = "OD4B Report {0} {1}.csv" #{0} for date, {1} for time
+$fullPath = $path + ($filename -f (Get-Date).ToShortDateString().Replace("/","-"), (Get-Date).ToShortTimeString().Replace(":","."))
+
 $extensionTypes = @{}
 
-$extensionTypes.Add("Word",@("doc","docx"))
+$extensionTypes.Add("Word",@("doc","docx","txt"))
 $extensionTypes.Add("Images",@("cr2","jpg"))
-$extensionTypes.Add("Excel",@("xls","xlsx"))
+$extensionTypes.Add("Spreadsheets",@("xls","xlsx","ods"))
 $extensionTypes.Add("PDF",@("pdf"))
 $extensionTypes.Add("Scripts",@("ps1","psm1","bat","py"))
-$extensionTypes.Add("Code",@("cs","resx","settings","csproj","pdb","cache","sln","manifest","resources"))
+$extensionTypes.Add("Code",@("cs","resx","settings","csproj","pdb","cache","sln","manifest","resources","suo"))
 $extensionTypes.Add("Music",@("mp3","ogg"))
 $extensionTypes.Add("Video",@("mp4","mov","avi","mpg","mpeg"))
 $extensionTypes.Add("Data",@("xml"))
-$extensionTypes.Add("Text",@("txt"))
 $extensionTypes.Add("Archives",@("zip","rar"))
 $extensionTypes.Add("Passwords",@("kdbx"))
 $extensionTypes.Add("Executables",@("exe"))
+$extensionTypes.Add("Other",@("thm"))
 
 ###
-#   Connect to O365 and input PnP credentials
+#   Check for connection/connect to SPO and input PnP credentials
 #   AppID/Secret created as per 
 #   https://docs.microsoft.com/en-us/sharepoint/dev/solution-guidance/security-apponly-azureacs
 #   With read-only tenant-wide access
 ###
 
-Connect-SPOService -url https://$tenant-admin.sharepoint.com
+try
+{
+    Get-SPOTenant | Out-Null
+}
+catch
+{
+    Connect-SPOService -url https://$tenant-admin.sharepoint.com
+}
+
 $appID = Read-Host "Enter the AppID"
 $appSecret = Read-Host "Enter the App Secret"
 
@@ -55,88 +66,102 @@ $appSecret = Read-Host "Enter the App Secret"
 $allUserData = @{}
 
 $manyDrives = Get-SPOSite -IncludePersonalSite $true -Template "SPSPERS#10" -Limit All
+$userCount = 1
 
 foreach($oneDrive in $manyDrives)
 {
+    Write-Progress -Activity ("Analyzing OD4B #{0} of {1}" -f $userCount, $manyDrives.Count) -PercentComplete (100*($userCount / $manyDrives.Count))
     $userData = @{}
+
+    foreach($extensionType in $extensionTypes.Keys)
+    {
+        $userData.Add(($extensionType+"_Count"),0)
+        $userData.Add(($extensionType+"_Size"),0)
+    }
+
+    $userData.Add("TotalCount",0)
+    $userData.Add("TotalSize",[long]0)
+
     Connect-PnPOnline -Url $oneDrive.Url -ClientID $appID -ClientSecret $appSecret
     
-    #check url is really connected
-
-    #In almost all cases there will just be one Documents library, but this should catch any that were created by the user as well
-    $libraries = Get-PnPList -Includes "IsSystemList" | where BaseType -eq "DocumentLibrary" | where IsSystemList -eq $false
-    
-    foreach($docLib in $libraries)
+    #check url is really connected to avoid non-blocking PnP errors/failures
+    $site = Get-PnPSite
+    if($oneDrive.Url -ne $site.Url)
     {
-        $allFiles = Get-PnPListItem -List $docLib.Id -PageSize 1000 
-        foreach($file in $allFiles)
+        Write-Warning ("Failed to connect to " + $site.Url)
+    }
+    else
+    {
+        #In almost all cases there will just be one Documents library, but this should catch any that were created by the user as well
+        $libraries = Get-PnPList -Includes "IsSystemList" | where BaseType -eq "DocumentLibrary" | where IsSystemList -eq $false
+        
+        $libraryCount = 1
+        foreach($docLib in $libraries)
         {
-            $size = $file.FieldValues.SMTotalFileStreamSize / $divisor
-            $extension = $file.fieldValues.File_x0020_Type
-
-            if($null -ne $extension)
+            Write-Progress -Id 1 -Activity ("Library #{0} out of {1}" -f $libraryCount, $libraries.Count) -PercentComplete (100*($libraryCount / $libraries.Count))
+            Write-Progress -Id 2 -Activity ("Fetching files, please wait..." -f 0, $docLib.ItemCount) -PercentComplete 0 #there's a long pause for Get-PnPListItem so an early progress bar helps
+            $allFiles = Get-PnPListItem -List $docLib.Id -PageSize 1000 
+            
+            $fileCount = 1
+            foreach($file in $allFiles)
             {
-                $found = $false
-                foreach($extensionType in $extensionTypes.Keys)
-                {
-                    if($extensionTypes[$extensionType] -contains $extension.ToLower())
-                    {
-                        $found = $true
-                        if($userData.Keys -notcontains ($extensionType+"_Count"))
-                        {
-                            #First case of this extension type for this user, start count
-                            $userData.Add(($extensionType+"_Count"),1)
-                        }
-                        else 
-                        {
-                            #Subsequent cases, add to count
-                            $userData[($extensionType+"_Count")] += 1
-                        }
+                Write-Progress -ID 2 -Activity ("File #{0} out of {1}" -f $fileCount, $docLib.ItemCount) -PercentComplete (100*($fileCount / $docLib.ItemCount))
+                $size = $file.FieldValues.SMTotalFileStreamSize
+                $extension = $file.fieldValues.File_x0020_Type
 
-                        if($userData.Keys -notcontains ($extensionType+"_Size"))
+                if($null -ne $extension)
+                {
+                    $found = $false
+                    foreach($extensionType in $extensionTypes.Keys)
+                    {
+                        if($extensionTypes[$extensionType] -contains $extension.ToLower())
                         {
-                            #First case of this extension type for this user, start count
-                            $userData.Add(($extensionType+"_Size"),$size)
-                        }
-                        else 
-                        {
-                            #Subsequent cases, add to count
+                            $userData[("TotalCount")] += 1
+                            $userData[("TotalSize")] += $size
+
+                            $found = $true
+                            $userData[($extensionType+"_Count")] += 1
                             $userData[($extensionType+"_Size")] += $size
                         }
                     }
-                }
 
-                if(-not $found)
-                {
-                    Write-Warning ("Extension not found! " + $extension)
+                    if(-not $found)
+                    {
+                        Write-Warning ("Extension not found! " + $extension)
+                    }
                 }
+                $fileCount = $fileCount + 1
             }
+
+            $libraryCount = $libraryCount + 1
         }
+
+        $allUserData.Add($oneDrive.Owner, $userData)
     }
 
-    $allUserData.Add($oneDrive.Owner, $userData)
+    $userCount = $userCount + 1
 }
 
-Write-Host "---------------------"
+$csvHeader = "TotalCount,TotalSize"
+
+foreach($extensionType in $extensionTypes.Keys)
+{
+    $csvHeader = $csvHeader + (",{0},{1}" -f ($extensionType+"_Count"), ($extensionType+"_Size ($divisor)"))
+}
+
+Add-Content -Path $fullPath $csvHeader
+
 foreach($user in $allUserData.Keys)
 {
-    Write-Host "Report for $user"
+    $csvLine = ("{0},{1}" -f $userData["TotalCount"], $userData["TotalSize"].ToString("#.##"))
 
     foreach($extensionType in $extensionTypes.Keys)
     {
         $countKey = $extensionType+"_Count"
         $sizeKey = $extensionType+"_Size"
 
-        if($allUserData[$user].Keys -contains $countKey)
-        {
-            Write-Host "$extensionType count: " $allUserData[$user][$countKey]
-        }
-
-        if($allUserData[$user].Keys -contains $sizeKey)
-        {
-            Write-Host "$extensionType size ($divisor): " $allUserData[$user][$sizeKey]
-        }
+        $csvLine = $csvLine + (",{0},{1}" -f $allUserData[$user][$countKey], ($allUserData[$user][$sizeKey]/$divisor))
     }
 
-    Write-Host "---------------------"
+    Add-Content -Path $fullPath $csvLine
 }

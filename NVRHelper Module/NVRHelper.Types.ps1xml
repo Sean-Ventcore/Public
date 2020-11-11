@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Types>
+  <Type>
+    <Name>nvrCamera</Name>
+    <Members>
+        <MemberSet>
+            <Name>PSStandardMembers</Name>
+            <Members>
+            <PropertySet>
+                <Name>DefaultDisplayPropertySet</Name>
+                <ReferencedProperties>
+                    <Name>CameraType</Name>
+                    <Name>Name</Name>
+                    <Name>IP</Name>
+                    <Name>Width</Name>
+                    <Name>Height</Name>
+                    <Name>AgentDVR_ID</Name>
+                </ReferencedProperties>
+            </PropertySet>
+            </Members>
+        </MemberSet>
+    </Members>
+  </Type>
+</Types>

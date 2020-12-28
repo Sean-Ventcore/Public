@@ -4,7 +4,7 @@
         <View>
             <Name>Default</Name>
             <ViewSelectedBy>
-                <TypeName>nvrCamera</TypeName>
+                <TypeName>ipCamera</TypeName>
             </ViewSelectedBy>
             <TableControl>
                 <TableRowEntries>

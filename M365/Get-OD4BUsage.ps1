@@ -21,7 +21,7 @@
 #   Variables / Configuration / Init
 ###
 
-#Import-Module ".\M365Helper.psd1"
+Import-Module ".\M365Helper.psd1"
 
 $divisor = "1MB" #file size will be divided by this
 

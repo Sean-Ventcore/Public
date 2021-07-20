@@ -418,6 +418,31 @@ function Get-AverageFileTimeInterval
     return $measurement
 }
 
+function New-RTSPSnapshot
+{
+    param
+    (
+        [Parameter(Mandatory=$true)]
+        [String]$Url,
+        [Parameter(Mandatory=$true)]
+        [String]$Name,
+        [String]$Pattern
+    )
+
+    if($null -eq $Pattern -or $Pattern.Length -eq 0)
+    {
+        $Pattern = "{0}-{1}.jpg"
+    }
+
+    if($env:path -notlike "*ffmpeg*")
+    {
+        $env:path = $env:path + ";" + $script:Config["ffmpegPath"]
+    }
+    
+    $out = ($script:Config["snapshotPath"] + ($pattern -f $Name, (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmm")))
+    ffmpeg.exe -y -rtsp_transport tcp -i $Url -vframes 1 $out
+}
+
 function New-NVRSnapshot
 {
     #Captures an image of the specified camera(s) current view, accepting either a single camera name

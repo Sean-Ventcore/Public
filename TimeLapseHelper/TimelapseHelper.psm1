@@ -97,7 +97,15 @@ function New-Timelapse
         # at the cost of masking the fact that there's missing data there.
         [Parameter()]
         [ValidateSet("Skip","Blank","Duplicate")]
-        [String]$MissingFrames
+        [String]$MissingFrames,
+
+        #Optional - specify the start/end time during the day to filter frames by
+        #to exclude long periods of dead time, i.e. for capturing work done during the day
+        #This will be ignored if SolarNoon is used
+        [Parameter()]
+        [DateTime]$DailyStart,
+        [Parameter()]
+        [DateTime]$DailyEnd
     )
 
     if($env:path -notlike "*ffmpeg*")
@@ -106,8 +114,14 @@ function New-Timelapse
     }
 
     $pattern = $camera+"-*.jpg"
-    $files = Get-ChildItem $pattern -Path $script:Config["snapshotPath"]
+    #$files = Get-ChildItem $pattern -Path $script:Config["snapshotPath"]
+    if($SolarNoon)
+    {
+        $pattern = "Solar{0}-*.jpg" -f $camera
+    }
 
+    $allFiles = Get-ChildItem -Path $script:Config["snapshotPath"] $pattern | Sort-Object CreationTime | Select-Object Name,FullName,CreationTime
+    
     $tempFile = New-TemporaryFile
     $filelistLine = "file '{0}'"
     
@@ -116,6 +130,40 @@ function New-Timelapse
     {
         throw "Error! Specified End time is not after specified Start time."
     }
+
+    #Determine max acceptable fuzziness - how far outside of the target time we're willing to flex
+    #in order to find a frame. These can be tweaked for desired behavior, but as a baseline it should
+    #be slightly less than the frame capture rate of the raw data (so we don't skip an entire interval and pick
+    #a previous frame, i.e. if the frame that should have started the timelapse wasn't created.)
+
+    #Assuming the frequency (of frames to be included in the timelapse) is longer than the capture rate
+    #(of frames in the raw data), which will cause other issues if it's not true, that's all we need to
+    #do, but since the capture rate isn't a required parameter, we'll also do a fallback calculation
+    #if the frequency was specified and capture rate wasn't. In those cases, half the frequency seems
+    #like a safe starting point.
+
+    #If neither is specified, we'll just pick the closest frame within the specified range 
+    #(even if there's a good frame a few milliseconds outside the specified range, so specifying
+    #either the frequency or capture rate is recommended, outside of very basic testing.)
+    $maxFuzziness = New-TimeSpan -Seconds 0
+
+    if($null -ne $CaptureRate)
+    {
+        $maxFuzziness = New-TimeSpan -Seconds ($CaptureRate.TotalSeconds * 0.9)
+        Write-Verbose "CaptureRate specified, maxFuzziness is now $maxFuzziness"
+    }
+    elseif($null -ne $Frequency)
+    {
+        $maxFuzziness = New-TimeSpan -Seconds ($Frequency.TotalSeconds / 2)
+        Write-Verbose "Frequency specified, maxFuzziness is now $maxFuzziness"
+    }
+
+    $fuzzyStart = $Start - $maxFuzziness
+    $fuzzyEnd = $End + $maxFuzziness
+
+    $files = $allFiles | where {$_.CreationTime -ge $fuzzyStart -and $_.CreationTime -le $fuzzyEnd}
+
+    Write-Host ("Files selected: " + $files.Count)
 
     #If frequency and capture rate are both specified, warn if the frequency doesn't divide evenly
     #into the capture rate - i.e. if we're capturing frames every 5 minutes, a timelapse of frames
@@ -186,33 +234,6 @@ function New-Timelapse
         }
     }
     
-    #Determine max acceptable fuzziness - how far outside of the target time we're willing to flex
-    #in order to find a frame. These can be tweaked for desired behavior, but as a baseline it should
-    #be slightly less than the frame capture rate of the raw data (so we don't skip an entire interval and pick
-    #a previous frame, i.e. if the frame that should have started the timelapse wasn't created.)
-
-    #Assuming the frequency (of frames to be included in the timelapse) is longer than the capture rate
-    #(of frames in the raw data), which will cause other issues if it's not true, that's all we need to
-    #do, but since the capture rate isn't a required parameter, we'll also do a fallback calculation
-    #if the frequency was specified and capture rate wasn't. In those cases, half the frequency seems
-    #like a safe starting point.
-
-    #If neither is specified, we'll just pick the closest frame within the specified range 
-    #(even if there's a good frame a few milliseconds outside the specified range, so specifying
-    #either the frequency or capture rate is recommended, outside of very basic testing.)
-    $maxFuzziness = New-TimeSpan -Seconds 0
-
-    if($null -ne $CaptureRate)
-    {
-        $maxFuzziness = New-TimeSpan -Seconds ($CaptureRate.TotalSeconds * 0.9)
-        Write-Verbose "CaptureRate specified, maxFuzziness is now $maxFuzziness"
-    }
-    elseif($null -ne $Frequency)
-    {
-        $maxFuzziness = New-TimeSpan -Seconds ($Frequency.TotalSeconds / 2)
-        Write-Verbose "Frequency specified, maxFuzziness is now $maxFuzziness"
-    }
-
     if($null -eq $Frequency)
     {
         Write-Verbose "Frequency is null"
@@ -251,6 +272,7 @@ function New-Timelapse
             #still use all frames. If capture rate wasn't specified, the fuzziness will be 0.
 
             Write-Verbose "All-Inclusive Timelapse"
+
             foreach($file in $files)
             {
                 $fileDate = [DateTime]::ParseExact($file.Name.Split('-')[1].Split('.')[0],"yyyyMMddHHmm",$null)
@@ -258,7 +280,10 @@ function New-Timelapse
                 if($fileDate -ge ($start - $maxFuzziness) -and $fileDate -le ($end + $maxFuzziness))
                 {
                     Write-Verbose "All-Inclusive Timelapse, adding file: $file"
-                    Add-Content -Path $tempFile -Value ($filelistLine -f $file.FullName)
+                    if(($DailyStart -eq $null -or $fileDate.TimeOfDay -ge $DailyStart.TimeOfDay) -and ($DailyEnd -eq $null -or $fileDate.TimeOfDay -le $DailyEnd.TimeOfDay))
+                    {
+                        Add-Content -Path $tempFile -Value ($filelistLine -f $file.FullName)
+                    }
                 }
             }
         }
@@ -279,7 +304,13 @@ function New-Timelapse
             
             if($null -ne $file)
             {
-                Add-Content -Path $tempFile -Value ($filelistLine -f $file.FullName)
+                $fileDate = [DateTime]::ParseExact($file.Name.Split('-')[1].Split('.')[0],"yyyyMMddHHmm",$null)
+
+                if(($DailyStart -eq $null -or $fileDate.TimeOfDay -ge $DailyStart.TimeOfDay) -and ($DailyEnd -eq $null -or $fileDate.TimeOfDay -le $DailyEnd.TimeOfDay))
+                {
+                    Add-Content -Path $tempFile -Value ($filelistLine -f $file.FullName)
+                }
+                
             }
             else
             {
@@ -293,7 +324,11 @@ function New-Timelapse
                 {
                     if($null -ne $oldFile)
                     {
-                        Add-Content -Path $tempFile -Value ($filelistLine -f $oldFile.FullName)
+                        $fileDate = [DateTime]::ParseExact($oldFile.Name.Split('-')[1].Split('.')[0],"yyyyMMddHHmm",$null)
+                        if(($DailyStart -eq $null -or $fileDate.TimeOfDay -ge $DailyStart.TimeOfDay) -and ($DailyEnd -eq $null -or $fileDate.TimeOfDay -le $DailyEnd.TimeOfDay))
+                        {
+                            Add-Content -Path $tempFile -Value ($filelistLine -f $oldFile.FullName)
+                        }
                     }
                 }
                 elseif($MissingFrames -eq "Blank")
@@ -308,8 +343,20 @@ function New-Timelapse
     }
 
     ffmpeg.exe -r $Framerate -f concat -safe 0 -i $tempFile.FullName -c:v mjpeg ($script:Config["timelapsePath"] + $name + ".mov")
+
+    ##cropping version - commented out, need to plumb in parameters to make it available
+    # $x1 = 1411
+    # $y1 = 212
+    # $x2 = 1569
+    # $y2 = 559
+    
+    # $width = [Math]::Abs($x2 - $x1)
+    # $height = [Math]::Abs($y2 - $y1)
+
+    # ffmpeg.exe -r $Framerate -f concat -safe 0 -i $tempFile.FullName -filter:v ("crop={0}:{1}:{2}:{3}" -f $width, $height, $x1, $y1) -c:v mjpeg ($script:Config["timelapsePath"] + $name + ".mov")
+    
     Write-Debug "$tempFile will be deleted now"
-    Remove-Item $tempFile
+    #Remove-Item $tempFile
 }
 
 function Get-SolarNoon

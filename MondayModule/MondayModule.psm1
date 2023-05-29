@@ -2,6 +2,13 @@ $script:Token = $null
 $script:Endpoint = "https://api.monday.com/v2"
 $script:DefaultLimit = 10
 
+#TODO: appropriate get/set/add/etc cmdlets for common object types
+#TODO: support for pagination
+#TODO: user-specified include/exclude fields in queries
+#TODO: condense more of the query building into a single function
+    #list of default fields, list and/or hashtable map for Kind or similar fields?
+    #what about objects with sub-objects (User -> Account)
+
 #region Internal Functions
 function ExecuteQuery
 {
@@ -173,6 +180,171 @@ function Get-MondayBoard
 
     }
 }
+
+function Get-MondayWorkspace
+{
+    [CmdletBinding(DefaultParameterSetName = 'NoFilter')]
+    param
+    (
+        [Parameter(ParameterSetName='FilterByID')]
+        [Parameter(ParameterSetName='FilterByOther')]
+        [Parameter(ParameterSetName='NoFilter')]
+        [Parameter(Mandatory=$false)][String]$Limit,
+        
+        [Parameter(ParameterSetName='FilterByID')][String]$ID,
+        
+        [Parameter(ParameterSetName='FilterByOther',Mandatory=$false)]
+        [ValidateSet("Open","Closed")]
+        [String]$Kind,
+
+        [Parameter(ParameterSetName='FilterByOther',Mandatory=$false)]
+        [ValidateSet("All","Active","Archived","Deleted")]
+        [String]$State
+    )
+
+    begin
+    {
+
+    }
+
+    process
+    {
+        #Result Limit
+        $itemFilter = "limit:$script:DefaultLimit "
+        if($null -ne $Limit -and $Limit.Length -gt 0)
+        {
+            if($Limit -eq "All")
+            {
+                $itemFilter = $null
+            }
+            elseif($null -ne ($Limit -as [int]))
+            {
+                $intLimit = $Limit -as [int]
+                if($intLimit -eq 0) {$intLimit = $script:DefaultLimit}
+                $itemFilter = "limit:$Limit "
+            }
+        }
+
+        #Sort Order
+        if($null -ne $SortOrder -and $SortOrder.Length -gt 0)
+        {
+            $itemFilter = $itemFilter + ("order_by:{0}_at " -f $SortOrder).ToLower()
+        }
+
+        #Kind
+        if($null -ne $Kind -and $Kind.Length -gt 0)
+        {
+            $itemFilter = $itemFilter + "board_kind:$Kind ".ToLower()
+        }
+
+        #State
+        if($null -ne $State -and $State.Length -gt 0)
+        {
+            $itemFilter = $itemFilter + "state:$State ".ToLower()
+        }
+
+        #ID
+        if($null -ne $ID -and $ID.Length -gt 0)
+        {
+            $itemFilter = $itemFilter + "ids:$ID "
+        }
+
+        #Finalize Filter
+        if($null -ne $itemFilter)
+        {
+            $itemFilter = (" ({0})" -f $itemFilter.TrimEnd(' '))
+        }
+
+        $query = "query { workspaces$itemFilter {id name kind state} }"
+        $result = ExecuteQuery -query $query
+        $result
+    }
+
+    end
+    {
+
+    }
+}
+
+function Get-MondayUser
+{
+    [CmdletBinding(DefaultParameterSetName = 'NoFilter')]
+    param
+    (
+        [Parameter(ParameterSetName='FilterByEmail')]
+        [Parameter(ParameterSetName='FilterByOther')]
+        [Parameter(ParameterSetName='NoFilter')]
+        [Parameter(Mandatory=$false)][String]$Limit,
+        
+        [Parameter(ParameterSetName='FilterByEmail')][String]$Email,
+
+        [Parameter(ParameterSetName='FilterByOther')][String]$Name,
+        
+        [Parameter(ParameterSetName='FilterByOther',Mandatory=$false)]
+        [ValidateSet("All","NotGuest","Guest","NotPending")]
+        [String]$Kind
+    )
+
+    begin
+    {
+
+    }
+
+    process
+    {
+        #Result Limit
+        $itemFilter = "limit:$script:DefaultLimit "
+        if($null -ne $Limit -and $Limit.Length -gt 0)
+        {
+            if($Limit -eq "All")
+            {
+                $itemFilter = $null
+            }
+            elseif($null -ne ($Limit -as [int]))
+            {
+                $intLimit = $Limit -as [int]
+                if($intLimit -eq 0) {$intLimit = $script:DefaultLimit}
+                $itemFilter = "limit:$Limit "
+            }
+        }
+
+        #Kind
+        if($null -ne $Kind -and $Kind.Length -gt 0)
+        {
+            $map = @{"All"="all"; "NotGuest"="non_guests"; "Guest"="guests"; "NotPending"="non_pending"}
+            $mapKind = $map[$Kind]
+            $itemFilter = $itemFilter + "kind:$mapKind "
+        }
+
+        #Name
+        if($null -ne $Name -and $Name.Length -gt 0)
+        {
+            $itemFilter = $itemFilter + "name:`"$Name`" ".ToLower()
+        }
+
+        #Email
+        if($null -ne $Email -and $Email.Length -gt 0)
+        {
+            $itemFilter = $itemFilter + "emails:$Email "
+        }
+
+        #Finalize Filter
+        if($null -ne $itemFilter)
+        {
+            $itemFilter = (" ({0})" -f $itemFilter.TrimEnd(' '))
+        }
+
+        $query = "query { users$itemFilter {email account { name id } } }"
+        $result = ExecuteQuery -query $query
+        $result
+    }
+
+    end
+    {
+
+    }
+}
+
 #endregion
 
 #region Set Cmdlets
@@ -235,6 +407,16 @@ function Set-MondayBoard
     {
 
     }
+}
+
+#endregion
+
+#region not yet implemented cmdlets
+
+function Add-MondayUserPermissions
+{
+    throw "Not yet implemented!"
+    #TODO: accept user, board, or workspace from pipeline, require user or board/workspace as non-pipeline parameter
 }
 
 #endregion

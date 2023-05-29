@@ -39,14 +39,21 @@ function ExecuteQuery
         $convertedContent = $responseContent | ConvertFrom-Json
         $responseType = ($convertedContent | Get-Member -MemberType NoteProperty).Name
         
-        if($responseType -eq "data")
+        if($responseType -eq "data" -or ($responseType -like "data" -eq "data"))
         {
             $data = $convertedContent.data
             $name = ($data | Get-Member -MemberType NoteProperty).Name
             
             $convertedContentWithTypedID = $responseContent.Replace("`"id`":",("`"{0}ID`":" -f $name)) | ConvertFrom-JSON
-            
-            return $convertedContentWithTypedID.data.$name
+            $returnValue = $convertedContentWithTypedID.data.$name
+
+            #final conversion for mutation/update queries
+            if($returnValue.GetType().Name -eq "String")
+            {
+                $returnValue = $returnValue | ConvertFrom-JSON
+            }
+
+            return $returnValue
         }
         elseif($responseType -eq "errors") #errors from the Monday API side
         {
@@ -80,9 +87,12 @@ function Connect-MondayService
 #region Get Cmdlets
 function Get-MondayBoard
 {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'NoFilter')]
     param
     (
+        [Parameter(ParameterSetName='FilterByID')]
+        [Parameter(ParameterSetName='FilterByOther')]
+        [Parameter(ParameterSetName='NoFilter')]
         [Parameter(Mandatory=$false)][String]$Limit,
         
         [Parameter(ParameterSetName='FilterByID')][String]$ID,
@@ -172,7 +182,19 @@ function Set-MondayBoard
     [CmdletBinding()]
     param
     (
-        [Parameter(ParameterSetName='pipelineID',ValueFromPipelineByPropertyName,Mandatory=$true)][String[]]$boardsID
+        [Parameter(ParameterSetName='pipelineID',ValueFromPipelineByPropertyName,Mandatory=$true)]
+        [String[]]$boardsID,
+
+        [Parameter(ParameterSetName='FilterByID')]
+        [String]$ID,
+
+        [Parameter(ParameterSetName='FilterByID')]
+        [Parameter(ParameterSetName='pipelineID')]
+        [Parameter(Mandatory=$false)][String]$Name,
+
+        [Parameter(ParameterSetName='FilterByID')]
+        [Parameter(ParameterSetName='pipelineID')]
+        [Parameter(Mandatory=$false)][String]$Description
     )
 
     begin
@@ -182,7 +204,31 @@ function Set-MondayBoard
 
     process
     {
-        Write-Host $_.name
+        if($null -ne $Name -and $Name.Length -gt 0)
+        {
+            $id = $_.boardsID
+            $query = "mutation { update_board(board_id: $id, board_attribute: name, new_value: `"$Name`") }"
+            $result = ExecuteQuery -query $query
+
+            if($result.success -ne $true)
+            {
+                $name = $_.name
+                Write-Warning "Error updating Board ID: $id Original Name: $name"
+            }
+        }
+
+        if($null -ne $Description -and $Description.Length -gt 0)
+        {
+            $id = $_.boardsID
+            $query = "mutation { update_board(board_id: $id, board_attribute: description, new_value: `"$Description`") }"
+            $result = ExecuteQuery -query $query
+
+            if($result.success -ne $true)
+            {
+                $name = $_.name
+                Write-Warning "Error updating Board ID: $id Original Name: $name"
+            }
+        }
     }
 
     end

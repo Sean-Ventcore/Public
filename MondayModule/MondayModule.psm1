@@ -1,13 +1,9 @@
 $script:Token = $null
-$script:Endpoint = "https://api.monday.com/v2"
-$script:DefaultLimit = 10
+$script:Config = Import-PowerShellDataFile ($PSScriptRoot + "/MondayModuleConfig.psd1")
 
-#TODO: appropriate get/set/add/etc cmdlets for common object types
 #TODO: support for pagination
 #TODO: user-specified include/exclude fields in queries
-#TODO: condense more of the query building into a single function
-    #list of default fields, list and/or hashtable map for Kind or similar fields?
-    #what about objects with sub-objects (User -> Account)
+#TODO: better generic handling of multiple fields in Set-*
 
 #region Internal Functions
 function ExecuteQuery
@@ -24,7 +20,7 @@ function ExecuteQuery
     }
     else
     {
-        $headers = @{"Authorization"=$script:Token; "Content-Type"="application/json"}
+        $headers = @{"Authorization"=$script:Token; "Content-Type"=$script:Config["ContentType"]}
         $json = $null
         if($null -ne $vars -and $vars.Length -gt 0)
         {
@@ -38,7 +34,7 @@ function ExecuteQuery
 
     Write-Debug "JSON in ExecuteQuery: $json"
 
-    $jsonResponse = Invoke-WebRequest -Uri $script:Endpoint -Method POST -Headers $headers -Body $json
+    $jsonResponse = Invoke-WebRequest -Uri $script:Config["Endpoint"] -Method POST -Headers $headers -Body $json
 
     if($jsonResponse.StatusCode -eq "200")
     {
@@ -117,15 +113,10 @@ function Get-MondayBoard
         [String]$State
     )
 
-    begin
-    {
-
-    }
-
     process
     {
         #Result Limit
-        $itemFilter = "limit:$script:DefaultLimit "
+        $itemFilter = "limit:{0} " -f $script:Config["DefaultLimit"]
         if($null -ne $Limit -and $Limit.Length -gt 0)
         {
             if($Limit -eq "All")
@@ -135,7 +126,7 @@ function Get-MondayBoard
             elseif($null -ne ($Limit -as [int]))
             {
                 $intLimit = $Limit -as [int]
-                if($intLimit -eq 0) {$intLimit = $script:DefaultLimit}
+                if($intLimit -eq 0) {$intLimit = $script:Config["DefaultLimit"]}
                 $itemFilter = "limit:$Limit "
             }
         }
@@ -171,13 +162,8 @@ function Get-MondayBoard
         }
 
         $query = "query { boards$itemFilter {id name board_kind state type} }"
-        $result = ExecuteQuery -query $query
-        $result
-    }
-
-    end
-    {
-
+        
+        return ExecuteQuery -query $query
     }
 }
 
@@ -202,15 +188,10 @@ function Get-MondayWorkspace
         [String]$State
     )
 
-    begin
-    {
-
-    }
-
     process
     {
         #Result Limit
-        $itemFilter = "limit:$script:DefaultLimit "
+        $itemFilter = "limit:{0} " -f $script:Config["DefaultLimit"]
         if($null -ne $Limit -and $Limit.Length -gt 0)
         {
             if($Limit -eq "All")
@@ -220,7 +201,7 @@ function Get-MondayWorkspace
             elseif($null -ne ($Limit -as [int]))
             {
                 $intLimit = $Limit -as [int]
-                if($intLimit -eq 0) {$intLimit = $script:DefaultLimit}
+                if($intLimit -eq 0) {$intLimit = $script:Config["DefaultLimit"]}
                 $itemFilter = "limit:$Limit "
             }
         }
@@ -256,13 +237,7 @@ function Get-MondayWorkspace
         }
 
         $query = "query { workspaces$itemFilter {id name kind state} }"
-        $result = ExecuteQuery -query $query
-        $result
-    }
-
-    end
-    {
-
+        return ExecuteQuery -query $query
     }
 }
 
@@ -285,15 +260,10 @@ function Get-MondayUser
         [String]$Kind
     )
 
-    begin
-    {
-
-    }
-
     process
     {
         #Result Limit
-        $itemFilter = "limit:$script:DefaultLimit "
+        $itemFilter = "limit:{0} " -f $script:Config["DefaultLimit"]
         if($null -ne $Limit -and $Limit.Length -gt 0)
         {
             if($Limit -eq "All")
@@ -303,7 +273,7 @@ function Get-MondayUser
             elseif($null -ne ($Limit -as [int]))
             {
                 $intLimit = $Limit -as [int]
-                if($intLimit -eq 0) {$intLimit = $script:DefaultLimit}
+                if($intLimit -eq 0) {$intLimit = $script:Config["DefaultLimit"]}
                 $itemFilter = "limit:$Limit "
             }
         }
@@ -335,19 +305,103 @@ function Get-MondayUser
         }
 
         $query = "query { users$itemFilter {email account { name id } } }"
-        $result = ExecuteQuery -query $query
-        $result
+
+        return ExecuteQuery -query $query
     }
 
-    end
-    {
+}
 
+function Get-MondayPlan
+{
+    [CmdletBinding()] param()
+
+    process
+    {
+        $query = "query { account { plan { max_users period tier version } } }"
+        return ExecuteQuery -query $query
+    }
+}
+
+function Get-MondayTeam
+{
+    [CmdletBinding(DefaultParameterSetName = 'NoFilter')]
+    param
+    (
+        [Parameter(ParameterSetName='FilterByID')][String]$ID,
+        [Parameter()][Switch]$IncludeUsers
+    )
+
+    process
+    {
+        #ID
+        if($null -ne $ID -and $ID.Length -gt 0)
+        {
+            $itemFilter = $itemFilter + "ids:$ID "
+        }
+
+        #Finalize Filter
+        if($null -ne $itemFilter)
+        {
+            $itemFilter = (" ({0})" -f $itemFilter.TrimEnd(' '))
+        }
+        if($IncludeUsers)
+        {
+            $query = "query$itemFilter { teams { id name users { email } } }"
+        }
+        else
+        {
+            $query = "query$itemFilter { teams { id name } }"
+        }
+        
+        return ExecuteQuery -query $query
+    }
+}
+
+function Get-MondayActivityLog
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(ParameterSetName='PipelineID',ValueFromPipelineByPropertyName,Mandatory=$true)]
+        [String[]]$boardsID,
+
+        [Parameter(ParameterSetName='SingleID',Mandatory=$true)]
+        [String]$BoardID,
+
+        [Parameter(ParameterSetName='SingleID',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineID',Mandatory=$true)]
+        [DateTime]$Start,
+
+        [Parameter(ParameterSetName='SingleID',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineID',Mandatory=$true)]
+        [DateTime]$End
+    )
+
+    process
+    {
+        $utcISO8601Start = $Start.ToUniversalTime() | get-date -Format o
+        $utcISO8601End = $End.ToUniversalTime() | get-date -Format o
+
+        $id = $null
+        if($PSCmdlet.ParameterSetName -eq "PipelineID")
+        {
+            $id = $_.boardsID
+        }
+
+        if($PSCmdlet.ParameterSetName -eq "SingleID")
+        {
+            $id = $BoardID
+        }
+
+        $query = "query { boards (ids: $id) { activity_logs (from: `"$utcISO8601Start`", to: `"$utcISO8601End`") { id event data } } }"
+        
+        return ExecuteQuery -query $query
     }
 }
 
 #endregion
 
-#region Set Cmdlets
+#region Add&Set Cmdlets
 
 function Set-MondayBoard
 {
@@ -368,11 +422,6 @@ function Set-MondayBoard
         [Parameter(ParameterSetName='pipelineID')]
         [Parameter(Mandatory=$false)][String]$Description
     )
-
-    begin
-    {
-
-    }
 
     process
     {
@@ -402,21 +451,25 @@ function Set-MondayBoard
             }
         }
     }
-
-    end
-    {
-
-    }
 }
 
 #endregion
 
 #region not yet implemented cmdlets
 
-function Add-MondayUserPermissions
+function Add-MondayFile
 {
     throw "Not yet implemented!"
-    #TODO: accept user, board, or workspace from pipeline, require user or board/workspace as non-pipeline parameter
+    #TODO: accept file in pipeline? or just via path? then upload file to alternate endpoint
 }
+
+#Adding team/user permissions to boards/workspaces - simplify for now by breaking up into cmdlet for each combo? taking objects vs. IDs? only take objects via pipeline?
+
+#Skipping for now due to lesser relevance: 
+    #app subscription/monetization status, board views, folders, me, notifications(create only)
+    #tags, updates
+
+#Skipping for now due to complexity of implementation: 
+    #columns/column values, docs/blocks, groups, items, subitems,
 
 #endregion

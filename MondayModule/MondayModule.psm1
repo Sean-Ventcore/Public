@@ -6,7 +6,7 @@ $script:Config = Import-PowerShellDataFile ($PSScriptRoot + "/MondayModuleConfig
 #TODO: better generic handling of multiple fields in Set-*
 
 #region Internal Functions
-function ExecuteQuery
+function ExecuteMondayQuery
 {
     param
     (
@@ -32,9 +32,11 @@ function ExecuteQuery
         }
     }
 
-    Write-Debug "JSON in ExecuteQuery: $json"
+    Write-Debug "JSON in ExecuteMondayQuery: $json"
 
     $jsonResponse = Invoke-WebRequest -Uri $script:Config["Endpoint"] -Method POST -Headers $headers -Body $json
+
+    Write-Debug ("Response: {0}" -f $jsonResponse.StatusCode)
 
     if($jsonResponse.StatusCode -eq "200")
     {
@@ -163,7 +165,7 @@ function Get-MondayBoard
 
         $query = "query { boards$itemFilter {id name board_kind state type} }"
         
-        return ExecuteQuery -query $query
+        return ExecuteMondayQuery -query $query
     }
 }
 
@@ -237,7 +239,7 @@ function Get-MondayWorkspace
         }
 
         $query = "query { workspaces$itemFilter {id name kind state} }"
-        return ExecuteQuery -query $query
+        return ExecuteMondayQuery -query $query
     }
 }
 
@@ -295,7 +297,7 @@ function Get-MondayUser
         #Email
         if($null -ne $Email -and $Email.Length -gt 0)
         {
-            $itemFilter = $itemFilter + "emails:$Email "
+            $itemFilter = $itemFilter + "emails:`"$Email`" "
         }
 
         #Finalize Filter
@@ -306,9 +308,8 @@ function Get-MondayUser
 
         $query = "query { users$itemFilter {email account { name id } } }"
 
-        return ExecuteQuery -query $query
+        return ExecuteMondayQuery -query $query
     }
-
 }
 
 function Get-MondayPlan
@@ -318,7 +319,7 @@ function Get-MondayPlan
     process
     {
         $query = "query { account { plan { max_users period tier version } } }"
-        return ExecuteQuery -query $query
+        return ExecuteMondayQuery -query $query
     }
 }
 
@@ -353,7 +354,7 @@ function Get-MondayTeam
             $query = "query$itemFilter { teams { id name } }"
         }
         
-        return ExecuteQuery -query $query
+        return ExecuteMondayQuery -query $query
     }
 }
 
@@ -395,13 +396,201 @@ function Get-MondayActivityLog
 
         $query = "query { boards (ids: $id) { activity_logs (from: `"$utcISO8601Start`", to: `"$utcISO8601End`") { id event data } } }"
         
-        return ExecuteQuery -query $query
+        return ExecuteMondayQuery -query $query
     }
 }
 
 #endregion
 
 #region Add&Set Cmdlets
+
+function Set-MondayPermission
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(ParameterSetName='PipelineOneUserManyBoards',ValueFromPipelineByPropertyName,Mandatory=$true,DontShow)]
+        [Parameter(ParameterSetName='PipelineOneTeamManyBoards',ValueFromPipelineByPropertyName,Mandatory=$true,DontShow)]
+        [String[]]$boardsID,
+
+        [Parameter(ParameterSetName='PipelineOneUserManyWorkspaces',ValueFromPipelineByPropertyName,Mandatory=$true,DontShow)]
+        [Parameter(ParameterSetName='PipelineOneTeamManyWorkspaces',ValueFromPipelineByPropertyName,Mandatory=$true,DontShow)]
+        [String[]]$workspacesID,
+
+        [Parameter(ParameterSetName='PipelineOneBoardManyUsers',ValueFromPipelineByPropertyName,Mandatory=$true,DontShow)]
+        [Parameter(ParameterSetName='PipelineOneWorkspaceManyUsers',ValueFromPipelineByPropertyName,Mandatory=$true,DontShow)]
+        [String[]]$account,
+
+        [Parameter(ParameterSetName='PipelineOneBoardManyTeams',ValueFromPipelineByPropertyName,Mandatory=$true,DontShow)]
+        [Parameter(ParameterSetName='PipelineOneWorkspaceManyTeams',ValueFromPipelineByPropertyName,Mandatory=$true,DontShow)]
+        [String[]]$teamsID,
+        
+        [Parameter(ParameterSetName='OneUserOneWorkspace',Mandatory=$true)]
+        [Parameter(ParameterSetName='OneUserOneBoard',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineOneUserManyWorkspaces',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineOneUserManyBoards',Mandatory=$true)]
+        [Parameter(Mandatory=$false)]$User,
+
+        [Parameter(ParameterSetName='OneTeamOneWorkspace',Mandatory=$true)]
+        [Parameter(ParameterSetName='OneTeamOneBoard',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineOneTeamManyWorkspaces',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineOneTeamManyBoards',Mandatory=$true)]
+        [Parameter(Mandatory=$false)]$Team,
+
+        [Parameter(ParameterSetName='OneUserOneWorkspace',Mandatory=$true)]
+        [Parameter(ParameterSetName='OneTeamOneWorkspace',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineOneWorkspaceManyUsers',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineOneWorkspaceManyTeams',Mandatory=$true)]
+        [Parameter(Mandatory=$false)]$Workspace,
+
+        [Parameter(ParameterSetName='OneUserOneBoard',Mandatory=$true)]
+        [Parameter(ParameterSetName='OneTeamOneBoard',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineOneBoardManyUsers',Mandatory=$true)]
+        [Parameter(ParameterSetName='PipelineOneBoardManyTeams',Mandatory=$true)]
+        [Parameter(Mandatory=$false)]$Board,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateSet("Subscriber","Owner")]
+        [String]$Kind
+    )
+
+    begin
+    {
+        #Verify any non-pipeline params have a potentially-valid ID
+        if($null -ne $User)
+        {
+            if($null -eq $User.account.usersID -or $User.account.usersID.Length -eq 0)
+            {
+                throw "Invalid User!"
+            }
+        }
+
+        if($null -ne $Team)
+        {
+            if($null -eq $Team.teamsID -or $Team.teamsID.Length -eq 0)
+            {
+                throw "Invalid Team!"
+            }
+        }
+
+        if($null -ne $Workspace)
+        {
+            if($null -eq $Workspace.workspacesID -or $Workspace.workspacesID.Length -eq 0)
+            {
+                throw "Invalid Workspace!"
+            }
+        }
+
+        if($null -ne $Board)
+        {
+            if($null -eq $Board.boardsID -or $Board.boardsID.Length -eq 0)
+            {
+                throw "Invalid Board!"
+            }
+        }
+    }
+
+    process
+    {
+        if($PSCmdlet.ParameterSetName -eq "OneUserOneWorkspace")
+        {
+            $securableType = "workspace"
+            $securingType = "user"
+            $securableID = $Workspace.workspacesID
+            $securingID = $User.account.usersID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "OneTeamOneWorkspace")
+        {
+            $securableType = "workspace"
+            $securingType = "team"
+            $securableID = $Workspace.workspacesID
+            $securingID = $Team.teamsID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "OneUserOneBoard")
+        {
+            $securableType = "board"
+            $securingType = "user"
+            $securableID = $Board.boardsID
+            $securingID = $User.account.usersID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "OneTeamOneBoard")
+        {
+            $securableType = "board"
+            $securingType = "team"
+            $securableID = $Board.boardsID
+            $securingID = $Team.teamsID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "PipelineOneUserManyBoards")
+        {
+            $securableType = "board"
+            $securingType = "user"
+            $securableID = $_.boardsID
+            $securingID = $User.account.usersID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "PipelineOneTeamManyBoards")
+        {
+            $securableType = "team"
+            $securingType = "board"
+            $securableID = $_.boardsID
+            $securingID = $Team.teamsID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "PipelineOneUserManyWorkspaces")
+        {
+            $securableType = "workspace"
+            $securingType = "user"
+            $securableID = $_.workspacesID
+            $securingID = $User.account.usersID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "PipelineOneTeamManyWorkspaces")
+        {
+            $securableType = "workspace"
+            $securingType = "team"
+            $securableID = $_.workspacesID
+            $securingID = $Team.teamsID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "PipelineOneBoardManyUsers")
+        {
+            $securableType = "board"
+            $securingType = "user"
+            $securableID = $Board.boardID
+            $securingID = $_.account.usersID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "PipelineOneWorkspaceManyUsers")
+        {
+            $securableType = "workspace"
+            $securingType = "user"
+            $securableID = $Workspace.workspacesID
+            $securingID = $_.account.usersID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "PipelineOneBoardManyTeams")
+        {
+            $securableType = "board"
+            $securingType = "team"
+            $securableID = $Board.boardsID
+            $securingID = $_.teamsID
+        }
+        elseif($PSCmdlet.ParameterSetName -eq "PipelineOneWorkspaceManyTeams")
+        {
+            $securableType = "workspace"
+            $securingType = "team"
+            $securableID = $Workspace.workspacesID
+            $securingID = $_.teamsID
+        }
+        else
+        {
+            Write-Debug $PSCmdlet.ParameterSetName
+            throw "Invalid Parameter Set!"
+        }
+
+        $query = "mutation { add_$($securingType)s_to_$($securableType) ($($securableType)_id: $securableID, $($securingType)_ids: [$securingID], kind: $($Kind.ToLower())) { id } }"
+        $result = ExecuteMondayQuery -query $query
+    }
+
+    end
+    {
+
+    }
+}
 
 function Set-MondayBoard
 {
@@ -429,7 +618,7 @@ function Set-MondayBoard
         {
             $id = $_.boardsID
             $query = "mutation { update_board(board_id: $id, board_attribute: name, new_value: `"$Name`") }"
-            $result = ExecuteQuery -query $query
+            $result = ExecuteMondayQuery -query $query
 
             if($result.success -ne $true)
             {
@@ -442,7 +631,7 @@ function Set-MondayBoard
         {
             $id = $_.boardsID
             $query = "mutation { update_board(board_id: $id, board_attribute: description, new_value: `"$Description`") }"
-            $result = ExecuteQuery -query $query
+            $result = ExecuteMondayQuery -query $query
 
             if($result.success -ne $true)
             {
@@ -463,13 +652,11 @@ function Add-MondayFile
     #TODO: accept file in pipeline? or just via path? then upload file to alternate endpoint
 }
 
-#Adding team/user permissions to boards/workspaces - simplify for now by breaking up into cmdlet for each combo? taking objects vs. IDs? only take objects via pipeline?
-
 #Skipping for now due to lesser relevance: 
     #app subscription/monetization status, board views, folders, me, notifications(create only)
     #tags, updates
 
 #Skipping for now due to complexity of implementation: 
-    #columns/column values, docs/blocks, groups, items, subitems,
+    #columns/column values, docs/blocks, groups, items, subitems
 
 #endregion
